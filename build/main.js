@@ -7013,6 +7013,42 @@ async function ForceGraphWithLabels(view, contentEl, nextPath, {
   linkGroups,
   linkType = ({ type: type2 }) => type2
 } = {}) {
+  const settings = app.plugins.plugins["obsidian-path-finder"].settings;
+const tagColorMap = new Map();
+try {
+    settings.tagColors.split('\n').forEach(line => {
+        const parts = line.split(',');
+        if (parts.length === 2) {
+            const tag = parts[0].trim().replace(/^#/, '');
+            const color = parts[1].trim();
+            if (tag && color) {
+                tagColorMap.set(tag, color);
+            }
+        }
+    });
+} catch (e) {
+    console.error("Path Finder: Lỗi phân tích cài đặt màu sắc tag.", e);
+}
+
+const getNodeColor = (d) => {
+    // Ưu tiên màu từ tag
+    const file = app.vault.getAbstractFileByPath(d.id);
+    if (file instanceof import_obsidian5.TFile) {
+        const cache = app.metadataCache.getFileCache(file);
+        const tags = (0, import_obsidian5.getAllTags)(cache);
+        if (tags) {
+            for (const tag of tags) {
+                const tagName = tag.substring(1); // bỏ dấu '#'
+                if (tagColorMap.has(tagName)) {
+                    return tagColorMap.get(tagName);
+                }
+            }
+        }
+    }
+    // Màu mặc định nếu không có tag khớp
+    return color2(nodeGroup(d));
+};
+
   contentEl.id = Date.now().toString();
   let nodes = getNodes(graph), links = getLinks(graph);
   let nodeIdArray = map(nodes, nodeId).map(intern);
@@ -7037,6 +7073,26 @@ async function ForceGraphWithLabels(view, contentEl, nextPath, {
       type: linkGroupArray[i]
     };
   });
+
+  // TÍNH NĂNG MỚI: Tính toán số lượng liên kết để xác định bán kính node
+  const nodeLinkCounts = new Map();
+  nodeIdArray.forEach(id => nodeLinkCounts.set(id, 0));
+  links.forEach(link => {
+      nodeLinkCounts.set(link.source, (nodeLinkCounts.get(link.source) || 0) + 1);
+      nodeLinkCounts.set(link.target, (nodeLinkCounts.get(link.target) || 0) + 1);
+  });
+
+  const baseRadius = 8;
+  const maxExtraRadius = 12;
+  // Tìm node có nhiều liên kết nhất để làm mốc tính toán
+  const maxLinks = Math.max(1, ...nodeLinkCounts.values()); 
+
+  const getNodeRadius = (d) => {
+      const count = nodeLinkCounts.get(d.id) || 0;
+      // Sử dụng thang đo căn bậc hai để sự khác biệt rõ ràng hơn
+      return baseRadius + Math.sqrt(count / maxLinks) * maxExtraRadius;
+  };
+
   if (nodeGroupArray && nodeGroups === void 0)
     nodeGroups = sort(nodeGroupArray);
   let color2 = nodeGroup == null ? null : ordinal(nodeGroups, colors);
@@ -7106,7 +7162,9 @@ async function ForceGraphWithLabels(view, contentEl, nextPath, {
   function setLinkClass(selection2, cls, flag = true) {
     selection2.classed(cls, flag);
   }
-  node.append("circle").classed("path-finder node-circle", true);
+  node.append("circle")
+    .attr("r", getNodeRadius)
+    .classed("path-finder node-circle", true);
   if (linkStrokeWidthArray)
     link.attr(
       "stroke-width",
@@ -7117,11 +7175,7 @@ async function ForceGraphWithLabels(view, contentEl, nextPath, {
       "stroke",
       ({ index: i }) => linkStrokeArray[i]
     );
-  if (nodeGroupArray)
-    node.attr(
-      "fill",
-      ({ index: i }) => color2(nodeGroupArray[i])
-    );
+  node.attr("fill", getNodeColor);
   if (nodeTitleArray)
     node.append("text").attr("x", 0).attr("y", -20).attr("align", "center").text(({ index: i }) => nodeTitleArray[i]).classed("path-finder node-text", true);
   if (invalidation != null)
@@ -7250,6 +7304,12 @@ function drag(simulation2) {
     return drag_default().on("start", dragstarted).on("drag", dragged).on("end", dragended);
   }
   let panelContainer = create_default("div").classed("path-finder panel-container is-close", true);
+  // TÍNH NĂNG MỚI: Ẩn bảng điều khiển trong chế độ khám phá
+    if (view.mode === 'local_graph') {
+        panelContainer.style("display", "none");
+    }
+
+  
   let panelTitleContainer = panelContainer.append("div").classed("path-finder panel-title", true);
   let leftButtonDiv = panelTitleContainer.append("div").classed("path-finder panel-button mod-prev", true);
   let panelTitle = panelTitleContainer.append("p").text("1/1").classed("path-finder panel-title title-text", true);
@@ -7285,8 +7345,11 @@ function drag(simulation2) {
   leftButtonDiv.on("click", view.prevPath);
   rightButtonDiv.on("click", view.nextPath);
   function updateGraph() {
+    // Lấy dữ liệu nodes và links mới từ đồ thị đã được cập nhật
     let nodes2 = getNodes(graph);
     let links2 = getLinks(graph);
+
+    // Chuẩn bị dữ liệu để D3 xử lý
     let N = map(nodes2, nodeId).map(intern);
     let LS = map(links2, linkSource).map(intern);
     let LT = map(links2, linkTarget).map(intern);
@@ -7298,11 +7361,15 @@ function drag(simulation2) {
     if (G && nodeGroups === void 0)
       nodeGroups = sort(G);
     let color3 = nodeGroup == null ? null : ordinal(nodeGroups, colors);
+
+    // Map dữ liệu mới vào định dạng D3
     nodes2 = map(nodes2, (_, i) => ({ id: N[i], group: nodeGroup(_) }));
     links2 = map(links2, (_, i) => {
       existLink.set(`${LS[i]}|${LT[i]}`, true);
       return { source: LS[i], target: LT[i], type: LG[i] };
     });
+
+    // Giữ lại vị trí của các node cũ để tránh đồ thị bị "giật"
     const old = new Map(
       node.data().map((d) => [d.id, d])
     );
@@ -7310,22 +7377,34 @@ function drag(simulation2) {
       (d) => Object.assign(old.get(d.id) || {}, d)
     );
     links2 = links2.map((d) => Object.assign({}, d));
+
+    // Cập nhật D3 selection cho các node
     node = node.data(nodes2, (d) => d.id).join(
       (enter) => enter.append("g").call(
-        (enter2) => enter2.append("circle").classed("path-finder node-circle", true)
+        // Áp dụng bán kính và màu sắc cho các node MỚI
+        (enter2) => enter2.append("circle").attr("r", getNodeRadius).classed("path-finder node-circle", true)
       ).call(
         (enter2) => enter2.append("text").attr("x", 0).attr("y", -20).attr("align", "center").text((d) => nodeTitle(d)).classed("path-finder node-text", true)
       ).call(
-        (enter2) => enter2.attr("fill", (d) => color3(nodeGroup(d)))
+        (enter2) => enter2.attr("fill", getNodeColor)
       )
     ).classed("path-finder node", true).classed("fixed", (d) => d.fx !== void 0).call(drag(simulation)).on("click", click).on("mouseover", setSelection(true)).on("mouseout", setSelection(false));
+
+    // Cập nhật D3 selection cho các liên kết
     link = link.data(links2, (d) => `${d.source}|${d.target}`).join("path").classed("path-finder link", true).attr("marker-end", (d) => `url(#arrow-${d.type})`);
+
+    // Cập nhật lực liên kết trong simulation
     const forceLink2 = link_default(links2).id(({ index: i }) => N[i]);
     if (linkStrength !== void 0)
       forceLink2.strength(linkStrength);
+
+    // Cập nhật simulation với dữ liệu mới và khởi động lại
     simulation.nodes(nodes2);
     simulation.force("link", forceLink2);
     simulation.alpha(1).restart().tick();
+
+    // Cập nhật bán kính của TẤT CẢ các node (cũ và mới) với hiệu ứng chuyển động
+    node.select("circle").transition().duration(250).attr("r", getNodeRadius);
   }
   function updatePathContent() {
     let pathsLength = paths.length;
@@ -7618,45 +7697,63 @@ var PathGraphView = class extends import_obsidian6.ItemView {
   }
   getLinks(graph) {
     let ret = [];
+    let resolvedLinks = app.metadataCache.resolvedLinks;
+    let addedLinks = /* @__PURE__ */ new Set();
     for (let i = 1; i <= graph.getEdgeCount(); i++) {
-      let fromFilePath = graph.getName(graph.edges[i].source), toFilePath = graph.getName(graph.edges[i].target);
+      let edge = graph.edges[i];
+      let fromFilePath = graph.getName(edge.source);
+      let toFilePath = graph.getName(edge.target);
       if (!fromFilePath || !toFilePath)
         continue;
-      let resolvedLinks = app.metadataCache.resolvedLinks;
-      if (resolvedLinks[fromFilePath][toFilePath]) {
-        let tmp = {
-          source: fromFilePath,
-          target: toFilePath,
-          type: resolvedLinks[toFilePath][fromFilePath] ? "bidirectional" : "monodirectional"
-        };
-        ret.push(tmp);
+      const linkKey1 = `${fromFilePath}|${toFilePath}`;
+      const linkKey2 = `${toFilePath}|${fromFilePath}`;
+      if (addedLinks.has(linkKey1) || addedLinks.has(linkKey2))
+        continue;
+      const forwardLinkExists = resolvedLinks[fromFilePath] && resolvedLinks[fromFilePath][toFilePath];
+      const backwardLinkExists = resolvedLinks[toFilePath] && resolvedLinks[toFilePath][fromFilePath];
+      if (forwardLinkExists || backwardLinkExists) {
+        let linkType = forwardLinkExists && backwardLinkExists ? "bidirectional" : "monodirectional";
+        let source = fromFilePath;
+        let target = toFilePath;
+        if (linkType === "monodirectional" && !forwardLinkExists) {
+          source = toFilePath;
+          target = fromFilePath;
+        }
+        ret.push({
+          source,
+          target,
+          type: linkType
+        });
+        addedLinks.add(linkKey1);
       }
     }
     return ret;
   }
   setData(from, to, length, graph, mode = "path_finding") {
-    this.mode = mode; 
-    this.fullGraph = graph; 
+    this.mode = mode;
+    this.fullGraph = graph;
     const contentEl = this.contentEl;
     contentEl.empty();
     let newGraph = new WeightedGraphWithNodeID();
     this.source = newGraph.addVerticeAndReturnID(from);
     this.target = to ? newGraph.addVerticeAndReturnID(to) : null;
-
-    if (mode === 'local_graph') {
-        const sourceId = this.fullGraph.getID(from);
-        if (sourceId) {
-            for (const edge of this.fullGraph.getOutEdges(sourceId)) {
-                const neighborName = this.fullGraph.getName(edge.target);
-                newGraph.addEdgeExtended(from, neighborName, 1);
-            }
+    if (mode === "local_graph") {
+      const sourceId = this.fullGraph.getID(from);
+      if (sourceId) {
+        for (const edge of this.fullGraph.getOutEdges(sourceId)) {
+          const neighborName = this.fullGraph.getName(edge.target);
+          newGraph.addEdgeExtended(from, neighborName, 1);
         }
+      }
     }
-
+    
+    // SỬA LỖI: Chỉ tạo bộ lặp đường đi khi ở chế độ tìm đường
+    const nextPathGenerator = mode === "local_graph" || !to ? async function* () {}() : getNextPath(this.fullGraph.getID(from), this.fullGraph.getID(to), length, this.fullGraph);
+    
     ForceGraphWithLabels(
       this,
       contentEl,
-      getNextPath(graph.getID(from), graph.getID(to), length, graph),
+      nextPathGenerator,
       {
         graph: newGraph,
         getNodes: this.getNodes.bind(this),
@@ -7664,6 +7761,9 @@ var PathGraphView = class extends import_obsidian6.ItemView {
       },
       {
         nodeGroup: (x2) => {
+          if (this.mode === 'local_graph') {
+              return x2.id === from ? "source" : "node";
+          }
           return x2.group;
         },
         nodeGroups: ["source", "target", "node"],
@@ -7866,7 +7966,9 @@ var DEFAULT_SETTINGS = {
   filter: {
     regexp: "",
     mode: "Exclude"
-  }
+  },
+  // TÍNH NĂNG MỚI: Thêm cài đặt màu sắc cho tag với một vài ví dụ
+  tagColors: "project,#4e79a7\nperson,#f28e2c\nconcept,#e15759"
 };
 var PathFinderPluginSettingTab = class extends import_obsidian7.PluginSettingTab {
   constructor(app2, plugin) {
@@ -7999,6 +8101,23 @@ The filter string will be matched everywhere in the file path(from vault root to
         settings.filter.mode = mode;
       });
     });
+     containerEl.createEl("h2", { text: "Graph Appearance" });
+    new import_obsidian7.Setting(containerEl)
+        .setName("Tag colors")
+        .setDesc(
+            "Định nghĩa màu sắc cho ghi chú dựa trên tag. Mỗi quy tắc một dòng, theo định dạng: ten_tag, #ma_mau_hex. Ví dụ: project, #4e79a7"
+        )
+        .addTextArea((text) => {
+            text
+                .setPlaceholder("project,#4e79a7\nperson,#f28e2c")
+                .setValue(settings.tagColors)
+                .onChange(async (value) => {
+                    settings.tagColors = value;
+                    await this.plugin.saveSettings();
+                });
+            text.inputEl.setAttr("rows", 5);
+            text.inputEl.addClass("path-finder-settings-textarea");
+        });
   }
 };
 
